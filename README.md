@@ -60,6 +60,26 @@ medusa fuzz
 
 The fuzz harness at `test/fuzz/AxonVaultFuzzHarness.sol` covers: balance conservation, payment/swap/protocol execution, operator ceiling enforcement, bot lifecycle, whitelist/blacklist integrity, signature validation, ERC-1271, and more.
 
+## Deployed Contracts
+
+### Arbitrum One (mainnet)
+
+| Contract | Address |
+| --- | --- |
+| AxonRegistry | [`0xbc1b61653EDB3906310D4AC8a789E144B1C5A0Ff`](https://arbiscan.io/address/0xbc1b61653EDB3906310D4AC8a789E144B1C5A0Ff) |
+| AxonVaultFactory | [`0x271cf17A42435Dc08f320c85834C08a3cb71A10d`](https://arbiscan.io/address/0x271cf17A42435Dc08f320c85834C08a3cb71A10d) |
+| Vault Implementation | [`0x236ea8301d2fC3e177e2C198E67CAFcECE6e1ed0`](https://arbiscan.io/address/0x236ea8301d2fC3e177e2C198E67CAFcECE6e1ed0) |
+
+### Testnets (Base Sepolia + Arbitrum Sepolia)
+
+| Contract | Address |
+| --- | --- |
+| AxonRegistry | [`0xf47E517B78FA7a1045E9857CD39cDC024a1a59b4`](https://sepolia.basescan.org/address/0xf47E517B78FA7a1045E9857CD39cDC024a1a59b4) |
+| AxonVaultFactory | [`0x2df2982445bd4dc38d496cec621c9b514b469792`](https://sepolia.basescan.org/address/0x2df2982445bd4dc38d496cec621c9b514b469792) |
+| Vault Implementation | [`0x9c427EbEBE9Acd98ac49e166E3AB159a7e1648F5`](https://sepolia.basescan.org/address/0x9c427EbEBE9Acd98ac49e166E3AB159a7e1648F5) |
+
+> Testnet contracts share deterministic addresses on both Base Sepolia (84532) and Arbitrum Sepolia (421614) via CREATE2.
+
 ## Architecture
 
 ```

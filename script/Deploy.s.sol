@@ -8,8 +8,8 @@ import "../src/AxonVaultFactory.sol";
 /// @notice Deploys AxonRegistry and AxonVaultFactory, then registers default swap routers.
 ///
 /// Environment variables:
-///   PRIVATE_KEY   — deployer's private key (testnet only; use --ledger on mainnet)
-///   OWNER_ADDRESS — address that will own both contracts (defaults to deployer if not set)
+///   PRIVATE_KEY   — deployer's private key (testnet only; omit when using --trezor/--ledger)
+///   OWNER_ADDRESS — address that will own both contracts (defaults to deployer)
 ///                   On mainnet this should be a Safe multisig address.
 ///
 /// Usage:
@@ -20,11 +20,11 @@ import "../src/AxonVaultFactory.sol";
 ///     --verify \
 ///     -vvvv
 ///
-///   # Mainnet with hardware wallet
+///   # Mainnet with Trezor (no PRIVATE_KEY needed)
 ///   forge script script/Deploy.s.sol \
-///     --rpc-url base \
+///     --rpc-url arb_mainnet \
 ///     --broadcast \
-///     --ledger \
+///     --trezor \
 ///     --verify \
 ///     -vvvv
 contract Deploy is Script {
@@ -32,13 +32,13 @@ contract Deploy is Script {
 
     function run() external {
         // ── Deployer key ─────────────────────────────────────────────────────
-        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
-        address deployer = vm.addr(deployerKey);
+        // If PRIVATE_KEY is set, use it (testnet). Otherwise assume --trezor/--ledger.
+        uint256 deployerKey = vm.envOr("PRIVATE_KEY", uint256(0));
+        bool useHardwareWallet = deployerKey == 0;
+        address deployer = useHardwareWallet ? msg.sender : vm.addr(deployerKey);
 
         // ── Owner address ─────────────────────────────────────────────────────
-        // On testnet this is typically the deployer itself.
-        // On mainnet set OWNER_ADDRESS to your Safe multisig so ownership
-        // lands directly on the multisig — no transfer step needed.
+        // Defaults to the deployer. On mainnet with Trezor, the Trezor IS the owner.
         address owner = vm.envOr("OWNER_ADDRESS", deployer);
 
         // ── Pre-flight log ────────────────────────────────────────────────────
@@ -53,7 +53,11 @@ contract Deploy is Script {
         // Same salt + same bytecode + same owner = same addresses on every chain.
         bytes32 salt = keccak256("axon-v1");
 
-        vm.startBroadcast(deployerKey);
+        if (useHardwareWallet) {
+            vm.startBroadcast();
+        } else {
+            vm.startBroadcast(deployerKey);
+        }
 
         // Verify the deterministic deployer exists on this chain
         require(DETERMINISTIC_DEPLOYER.code.length > 0, "Deterministic deployer not found on this chain");
