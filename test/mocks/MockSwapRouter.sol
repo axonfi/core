@@ -43,5 +43,10 @@ contract MockSwapRouter {
         require(ok, "ETH transfer failed");
     }
 
+    /// @notice Simulates swapping native ETH → ERC-20. Receives ETH via msg.value, sends toToken to recipient.
+    function swapFromNative(address toToken, uint256 toAmount, address recipient) external payable {
+        IERC20(toToken).transfer(recipient, toAmount);
+    }
+
     receive() external payable { }
 }

@@ -4671,4 +4671,158 @@ contract AxonVaultTest is Test {
         vm.expectRevert(AxonVault.BotNotActive.selector);
         vault.executeProtocol(intent, sig, callData);
     }
+
+    // =========================================================================
+    // Audit gap tests
+    // =========================================================================
+
+    // 1. previewSwapSlippage — verify it returns correct USD values and pass/fail
+    function test_previewSwapSlippage_returns_correct_values() public view {
+        // Default slippage is 9500 bps (95%). USDC→USDC oracle returns amount directly.
+        // 100 USDC in, 96 USDC out → should pass (96 >= 95)
+        (bool wouldPass, uint256 fromUsd, uint256 toUsd, uint256 minToUsd) =
+            vault.previewSwapSlippage(address(usdc), 100 * USDC_DECIMALS, address(usdc), 96 * USDC_DECIMALS);
+        assertTrue(wouldPass);
+        assertEq(fromUsd, 100 * USDC_DECIMALS);
+        assertEq(toUsd, 96 * USDC_DECIMALS);
+        assertEq(minToUsd, 100 * USDC_DECIMALS * 9500 / 10_000); // 95 USDC
+
+        // 100 USDC in, 90 USDC out → should fail (90 < 95)
+        (bool wouldPass2,,,) =
+            vault.previewSwapSlippage(address(usdc), 100 * USDC_DECIMALS, address(usdc), 90 * USDC_DECIMALS);
+        assertFalse(wouldPass2);
+    }
+
+    // 2. SwapSlippageTooHigh revert path — trigger oracle-based slippage rejection
+    function test_executeSwap_reverts_SwapSlippageTooHigh() public {
+        // USDC→USDC swap where router delivers far less than input (below 95% threshold)
+        uint256 fromAmount = 100 * USDC_DECIMALS;
+        uint256 toAmount = 80 * USDC_DECIMALS; // 80% retention, below 95% threshold
+
+        // Fund router with USDT (use a priceable token)
+        // Use USDC→USDC to keep oracle pricing simple (both price at face value)
+        usdc.mint(address(swapRouter), toAmount);
+
+        // Create a second USDC-like token that the oracle prices the same
+        // Actually: use USDC as both from and to — router pulls USDC, sends USDC back (less)
+        // But from/to can't be same token. Use USDT with a deployed oracle pool.
+        // Deploy USDT oracle pool at $1 (same tick as USDC)
+        _deployMockPool(address(usdt), address(usdc), 3000, 0); // tick 0 ≈ 1:1
+
+        usdt.mint(address(swapRouter), toAmount);
+
+        AxonVault.SwapIntent memory intent = AxonVault.SwapIntent({
+            bot: bot,
+            toToken: address(usdt),
+            minToAmount: toAmount, // bot accepts 80 USDT
+            fromToken: address(usdc),
+            maxFromAmount: fromAmount,
+            deadline: _deadline(),
+            ref: bytes32("slippage-high")
+        });
+        bytes memory sig = _signSwap(BOT_KEY, intent);
+        bytes memory swapData =
+            abi.encodeCall(MockSwapRouter.swap, (address(usdc), fromAmount, address(usdt), toAmount, address(vault)));
+
+        vm.prank(relayer);
+        vm.expectRevert(AxonVault.SwapSlippageTooHigh.selector);
+        vault.executeSwap(intent, sig, address(swapRouter), swapData);
+    }
+
+    // 3. Native ETH as fromToken in executeSwap
+    function test_executeSwap_native_eth_as_fromToken() public {
+        uint256 ethAmount = 1 ether;
+        uint256 usdcOut = 2000 * USDC_DECIMALS;
+
+        // Fund vault with ETH and router with USDC
+        vm.deal(address(vault), ethAmount);
+        usdc.mint(address(swapRouter), usdcOut);
+
+        // Update bot's maxRebalanceAmount to cover 1 ETH (~$2000)
+        vm.prank(vaultOwner);
+        vault.updateBotConfig(
+            bot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 5000 * USDC_DECIMALS,
+                maxRebalanceAmount: 5000 * USDC_DECIMALS,
+                aiTriggerThreshold: 10_000 * USDC_DECIMALS,
+                requireAiVerification: false,
+                spendingLimits: new AxonVault.SpendingLimit[](0)
+            })
+        );
+
+        AxonVault.SwapIntent memory intent = AxonVault.SwapIntent({
+            bot: bot,
+            toToken: address(usdc),
+            minToAmount: usdcOut,
+            fromToken: 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE, // NATIVE_ETH
+            maxFromAmount: ethAmount,
+            deadline: _deadline(),
+            ref: bytes32("eth-swap")
+        });
+        bytes memory sig = _signSwap(BOT_KEY, intent);
+        // Router receives ETH via call{value}, sends USDC back
+        bytes memory swapData = abi.encodeCall(MockSwapRouter.swapFromNative, (address(usdc), usdcOut, address(vault)));
+
+        vm.prank(relayer);
+        vault.executeSwap(intent, sig, address(swapRouter), swapData);
+
+        // Vault should have received USDC and spent ETH
+        assertEq(usdc.balanceOf(address(vault)), VAULT_DEPOSIT + usdcOut);
+        assertEq(address(vault).balance, 0);
+    }
+
+    // 4. setMaxSwapSlippageBps(10001) revert — bps > 10000
+    function test_setMaxSwapSlippageBps_reverts_above_10000() public {
+        vm.prank(vaultOwner);
+        vm.expectRevert("bps > 10000");
+        vault.setMaxSwapSlippageBps(10_001);
+    }
+
+    // 5. Operator ceiling behavior when maxPerTxAmount ceiling is 0 on update
+    //    When ceiling.maxPerTxAmount = 0, operator must preserve the current bot value (cannot change it)
+    function test_operator_ceiling_maxPerTxAmount_zero_on_update() public {
+        // Set ceilings with maxPerTxAmount = 0 (operator cannot change per-tx cap)
+        vm.prank(vaultOwner);
+        vault.setOperatorCeilings(
+            AxonVault.OperatorCeilings({
+                maxPerTxAmount: 0, maxBotDailyLimit: 0, maxOperatorBots: 5, vaultDailyAggregate: 0, minAiTriggerFloor: 0
+            })
+        );
+
+        // Bot's current config from setUp
+        AxonVault.BotConfig memory currentConfig = vault.getBotConfig(bot);
+        uint256 currentMaxPerTx = currentConfig.maxPerTxAmount;
+
+        // Must preserve spending limits count (operator can't reduce)
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](1);
+        limits[0] = AxonVault.SpendingLimit({ amount: 10_000 * USDC_DECIMALS, maxCount: 0, windowSeconds: 86400 });
+
+        // Operator tries to change maxPerTxAmount → should revert
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.ExceedsOperatorCeiling.selector);
+        vault.updateBotConfig(
+            bot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: currentMaxPerTx + 1, // different value → revert
+                maxRebalanceAmount: currentConfig.maxRebalanceAmount,
+                aiTriggerThreshold: currentConfig.aiTriggerThreshold,
+                requireAiVerification: currentConfig.requireAiVerification,
+                spendingLimits: limits
+            })
+        );
+
+        // Operator preserves the same value → should succeed
+        vm.prank(operator);
+        vault.updateBotConfig(
+            bot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: currentMaxPerTx, // same value → OK
+                maxRebalanceAmount: currentConfig.maxRebalanceAmount,
+                aiTriggerThreshold: currentConfig.aiTriggerThreshold,
+                requireAiVerification: currentConfig.requireAiVerification,
+                spendingLimits: limits
+            })
+        );
+    }
 }
