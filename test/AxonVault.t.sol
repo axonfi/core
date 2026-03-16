@@ -4825,4 +4825,254 @@ contract AxonVaultTest is Test {
             })
         );
     }
+
+    // =========================================================================
+    // Coverage gap tests
+    // =========================================================================
+
+    // onlyOwnerOrOperator revert for random address
+    function test_onlyOwnerOrOperator_reverts_for_random_address() public {
+        vm.prank(attacker);
+        vm.expectRevert(AxonVault.NotAuthorized.selector);
+        vault.pause();
+    }
+
+    // removeBotDestination happy path
+    function test_removeBotDestination() public {
+        address dest = makeAddr("dest");
+
+        // Owner adds a bot-specific destination
+        vm.prank(vaultOwner);
+        vault.addBotDestination(bot, dest);
+        assertTrue(vault.botDestinationWhitelist(bot, dest));
+        assertEq(vault.botDestinationCount(bot), 1);
+
+        // Operator removes it (tightening — allowed)
+        vm.prank(operator);
+        vault.removeBotDestination(bot, dest);
+        assertFalse(vault.botDestinationWhitelist(bot, dest));
+        assertEq(vault.botDestinationCount(bot), 0);
+    }
+
+    // removeBotDestination by owner
+    function test_removeBotDestination_by_owner() public {
+        address dest = makeAddr("dest");
+
+        vm.prank(vaultOwner);
+        vault.addBotDestination(bot, dest);
+
+        vm.prank(vaultOwner);
+        vault.removeBotDestination(bot, dest);
+        assertFalse(vault.botDestinationWhitelist(bot, dest));
+    }
+
+    // operatorPause and owner unpause
+    function test_operator_pause_and_owner_unpause() public {
+        // Operator pauses
+        vm.prank(operator);
+        vault.pause();
+        assertTrue(vault.paused());
+
+        // Owner unpauses
+        vm.prank(vaultOwner);
+        vault.unpause();
+        assertFalse(vault.paused());
+    }
+
+    // Operator cannot disable requireAiVerification once enabled (coverage gap)
+    function test_operator_cannot_disable_requireAiVerification_on_update() public {
+        // Owner adds bot with requireAiVerification = true
+        address newBot = makeAddr("aiBot");
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](1);
+        limits[0] = AxonVault.SpendingLimit({ amount: 10_000 * USDC_DECIMALS, maxCount: 0, windowSeconds: 86400 });
+
+        vm.prank(vaultOwner);
+        vault.addBot(
+            newBot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 100 * USDC_DECIMALS,
+                requireAiVerification: true,
+                spendingLimits: limits
+            })
+        );
+
+        // Operator tries to disable requireAiVerification → revert
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.ExceedsOperatorCeiling.selector);
+        vault.updateBotConfig(
+            newBot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 100 * USDC_DECIMALS,
+                requireAiVerification: false, // trying to disable → revert
+                spendingLimits: limits
+            })
+        );
+    }
+
+    // Operator hits bot limit (maxOperatorBots)
+    function test_operator_bot_limit_reached() public {
+        // Set ceiling to only 2 bots
+        vm.prank(vaultOwner);
+        vault.setOperatorCeilings(
+            AxonVault.OperatorCeilings({
+                maxPerTxAmount: 1_000 * USDC_DECIMALS,
+                maxBotDailyLimit: 5_000 * USDC_DECIMALS,
+                maxOperatorBots: 2,
+                vaultDailyAggregate: 10_000 * USDC_DECIMALS,
+                minAiTriggerFloor: 500 * USDC_DECIMALS
+            })
+        );
+
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](1);
+        limits[0] = AxonVault.SpendingLimit({ amount: 1_000 * USDC_DECIMALS, maxCount: 0, windowSeconds: 86400 });
+        AxonVault.BotConfigParams memory params = AxonVault.BotConfigParams({
+            maxPerTxAmount: 500 * USDC_DECIMALS,
+            maxRebalanceAmount: 0,
+            aiTriggerThreshold: 100 * USDC_DECIMALS,
+            requireAiVerification: false,
+            spendingLimits: limits
+        });
+
+        // Operator adds 2 bots (OK)
+        vm.prank(operator);
+        vault.addBot(makeAddr("opBot1"), params);
+        vm.prank(operator);
+        vault.addBot(makeAddr("opBot2"), params);
+
+        // 3rd bot → revert
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.OperatorBotLimitReached.selector);
+        vault.addBot(makeAddr("opBot3"), params);
+    }
+
+    // Operator cannot add bots when maxOperatorBots = 0
+    function test_operator_cannot_add_bot_when_ceiling_zero() public {
+        vm.prank(vaultOwner);
+        vault.setOperatorCeilings(
+            AxonVault.OperatorCeilings({
+                maxPerTxAmount: 1_000 * USDC_DECIMALS,
+                maxBotDailyLimit: 0,
+                maxOperatorBots: 0, // operator cannot add any bots
+                vaultDailyAggregate: 0,
+                minAiTriggerFloor: 0
+            })
+        );
+
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](0);
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.OperatorBotLimitReached.selector);
+        vault.addBot(
+            makeAddr("blocked"),
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 0,
+                requireAiVerification: false,
+                spendingLimits: limits
+            })
+        );
+    }
+
+    // previewSwapSlippage with unknown fromToken (oracle catch block — line 964)
+    function test_previewSwapSlippage_unknown_fromToken_returns_pass() public {
+        address unknownToken = makeAddr("unknownToken");
+        // Unknown token has no oracle pool → catch block → returns (true, 0, 0, 0)
+        (bool wouldPass, uint256 fromUsd, uint256 toUsd, uint256 minToUsd) =
+            vault.previewSwapSlippage(unknownToken, 1000e6, address(usdc), 1000e6);
+        assertTrue(wouldPass);
+        assertEq(fromUsd, 0);
+        assertEq(toUsd, 0);
+        assertEq(minToUsd, 0);
+    }
+
+    // previewSwapSlippage with known fromToken but unknown toToken (oracle catch block — line 970)
+    function test_previewSwapSlippage_unknown_toToken_returns_pass() public {
+        address unknownToken = makeAddr("unknownToken");
+        // USDC has oracle (it IS the stablecoin base), unknown token doesn't → second catch block
+        (bool wouldPass, uint256 fromUsd, uint256 toUsd, uint256 minToUsd) =
+            vault.previewSwapSlippage(address(usdc), 1000e6, unknownToken, 1000e6);
+        assertTrue(wouldPass);
+        // fromUsd should be non-zero (USDC has oracle), toUsd = 0 (unknown)
+        assertEq(toUsd, 0);
+        assertEq(minToUsd, 0);
+    }
+
+    // Operator exceeds daily limit ceiling
+    function test_operator_exceeds_daily_limit_ceiling() public {
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](1);
+        // $10,000/hour → effective $240,000/day → exceeds $5,000 maxBotDailyLimit
+        limits[0] = AxonVault.SpendingLimit({ amount: 10_000 * USDC_DECIMALS, maxCount: 0, windowSeconds: 3600 });
+
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.ExceedsOperatorCeiling.selector);
+        vault.addBot(
+            makeAddr("highBot"),
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 100 * USDC_DECIMALS,
+                requireAiVerification: false,
+                spendingLimits: limits
+            })
+        );
+    }
+
+    // Operator must include a daily-or-shorter window when maxBotDailyLimit ceiling is set
+    function test_operator_missing_daily_window_reverts() public {
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](1);
+        // 7-day window only → no daily-or-shorter window → revert
+        limits[0] = AxonVault.SpendingLimit({ amount: 1_000 * USDC_DECIMALS, maxCount: 0, windowSeconds: 604800 });
+
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.ExceedsOperatorCeiling.selector);
+        vault.addBot(
+            makeAddr("noDailyBot"),
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 100 * USDC_DECIMALS,
+                requireAiVerification: false,
+                spendingLimits: limits
+            })
+        );
+    }
+
+    // Operator cannot reduce spending limits count on update
+    function test_operator_cannot_reduce_spending_limits() public {
+        // Add bot with 1 spending limit via owner
+        address newBot = makeAddr("limitBot");
+        AxonVault.SpendingLimit[] memory limits = new AxonVault.SpendingLimit[](1);
+        limits[0] = AxonVault.SpendingLimit({ amount: 1_000 * USDC_DECIMALS, maxCount: 0, windowSeconds: 86400 });
+
+        vm.prank(vaultOwner);
+        vault.addBot(
+            newBot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 100 * USDC_DECIMALS,
+                requireAiVerification: false,
+                spendingLimits: limits
+            })
+        );
+
+        // Operator tries to update with 0 spending limits (loosening) → revert
+        AxonVault.SpendingLimit[] memory emptyLimits = new AxonVault.SpendingLimit[](0);
+        vm.prank(operator);
+        vm.expectRevert(AxonVault.ExceedsOperatorCeiling.selector);
+        vault.updateBotConfig(
+            newBot,
+            AxonVault.BotConfigParams({
+                maxPerTxAmount: 500 * USDC_DECIMALS,
+                maxRebalanceAmount: 0,
+                aiTriggerThreshold: 100 * USDC_DECIMALS,
+                requireAiVerification: false,
+                spendingLimits: emptyLimits
+            })
+        );
+    }
 }
